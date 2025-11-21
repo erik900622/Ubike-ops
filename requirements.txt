@@ -1,0 +1,8 @@
+requests
+pandas
+schedule
+sqlalchemy
+scikit-learn
+streamlit
+pydeck
+plotly

@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+*.err
+
+# Local DB & data
+data/ubike.db
+data/*.csv
+youbike_test2.csv
+
+# Notebooks
+notebooks/
+
+# Streamlit
+.streamlit/
