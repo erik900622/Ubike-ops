@@ -85,3 +85,72 @@ def generate_status_report():
 
 if __name__ == "__main__":
     print(generate_status_report())
+    
+    
+    
+    
+# --- Flow / Heatmap 用：最近 N 小時的流量統計 ---
+
+from src.database import get_engine
+from sqlalchemy import text
+
+
+def get_hourly_flow_stats(hours_lookback: int = 24):
+    """
+    統計最近 N 小時的：
+    - 全體平均可借車數（依小時）
+    - 各區 x 小時 的平均空車比例空間 (heatmap 用)
+
+    回傳:
+      line_df  : columns = ["hour", "avg_rent"]
+      heat_piv : index = sarea, columns = hour(0~23), 值 = empty_ratio 平均
+    """
+    engine = get_engine()
+
+    # 從 DB 抓最近 N 小時資料
+    query = text(f"""
+        SELECT collection_time, sarea, rent, return_count
+        FROM stations_realtime
+        WHERE collection_time >= datetime('now', '-{hours_lookback} hours', 'localtime')
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+
+    if df.empty:
+        return pd.DataFrame(columns=["hour", "avg_rent"]), pd.DataFrame()
+
+    # 轉時間 + 算小時
+    df["collection_time"] = pd.to_datetime(df["collection_time"], errors="coerce")
+    df = df.dropna(subset=["collection_time"])
+    df["hour"] = df["collection_time"].dt.hour
+
+    # capacity / empty_ratio
+    df["capacity"] = (df["rent"] + df["return_count"]).clip(lower=1)
+    df["empty_ratio"] = 1 - (df["rent"] / df["capacity"])
+
+    # 1) 全體平均可借車數（越低代表越忙）
+    line_df = (
+        df.groupby("hour", as_index=False)["rent"]
+        .mean()
+        .rename(columns={"rent": "avg_rent"})
+        .sort_values("hour")
+    )
+
+    # 2) 區域 x 小時 空車比例 heatmap
+    heat_df = (
+        df.groupby(["sarea", "hour"], as_index=False)["empty_ratio"]
+        .mean()
+    )
+
+    heat_piv = heat_df.pivot_table(
+        index="sarea",
+        columns="hour",
+        values="empty_ratio",
+        aggfunc="mean",
+    ).sort_index()
+
+    # 確保欄名是 int（0~23），避免 Arrow/Plotly 奇怪型別問題
+    heat_piv.columns = [int(c) for c in heat_piv.columns]
+
+    return line_df, heat_piv
