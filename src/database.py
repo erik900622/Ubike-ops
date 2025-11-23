@@ -1,25 +1,27 @@
-# src/database.py
+# ============================================================
 import pandas as pd
 from sqlalchemy import create_engine, text
 from src.config import DB_URL
 
-# 全域 Engine（本地 SQLite / 未來可換成 PostgreSQL）
 engine = create_engine(DB_URL, pool_pre_ping=True, future=True)
-
 
 def get_engine():
     return engine
 
 
-# ============================================================
-# 1. 建表 + 索引
-# ============================================================
 def init_db():
     """建立 stations_realtime 表與索引（若不存在）。"""
+    dialect = engine.dialect.name  # 'sqlite' or 'postgresql'
+
+    if dialect == "postgresql":
+        id_col = "BIGSERIAL PRIMARY KEY"
+    else:  # sqlite 等
+        id_col = "INTEGER PRIMARY KEY"
+
     with engine.begin() as conn:
-        conn.execute(text("""
+        conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS stations_realtime (
-                id INTEGER PRIMARY KEY,
+                id {id_col},
                 collection_time TEXT,
                 sno TEXT,
                 sna TEXT,
@@ -43,7 +45,6 @@ def init_db():
         """))
 
     print("[database] Initialized.")
-
 
 # ============================================================
 # 2. 寫入資料（API → DataFrame → DB）
