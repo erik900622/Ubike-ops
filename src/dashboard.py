@@ -30,7 +30,14 @@ def load_current_status():
 def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
     """
     回傳欄位：
-    sarea, sno, sna, hour(整數), avg_rent, avg_return, empty_ratio
+      sarea, sno, sna, hour, avg_rent, avg_return, capacity, rpi, need_bikes
+
+    定義：
+      capacity   = avg_rent + avg_return（該時段平均可借 + 可還，當作有效容量）
+      rpi        = Rebalance Pressure Index 補車壓力指數
+                   > 0  → 車太少，需要補車（目標 50% 滿）
+                   < 0  → 車太多，需要移車
+      need_bikes = 依照 rpi 換算成「理論上還差幾台」，已四捨五入成整數
     """
     engine = get_engine()
     sql = """
@@ -40,14 +47,7 @@ def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
             sna,
             CAST(strftime('%H', collection_time) AS INTEGER) AS hour,
             AVG(rent) AS avg_rent,
-            AVG(return_count) AS avg_return,
-            AVG(
-                CASE 
-                    WHEN (rent + return_count) > 0 
-                    THEN 1.0 - (1.0 * rent / (rent + return_count))
-                    ELSE 0.0
-                END
-            ) AS empty_ratio
+            AVG(return_count) AS avg_return
         FROM stations_realtime
         WHERE 
             collection_time >= datetime('now', '-1 day', 'localtime')
@@ -55,6 +55,28 @@ def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
         GROUP BY sarea, sno, sna, hour
     """
     df = pd.read_sql(sql, engine, params={"sh": start_hour, "eh": end_hour})
+
+    if df.empty:
+        return df
+
+    # ---- 容量 + 補車壓力指數 ----
+    capacity = df["avg_rent"] + df["avg_return"]
+    df["capacity"] = capacity
+
+    df["rpi"] = 0.0
+    df["need_bikes"] = 0
+
+    mask = capacity > 0
+    # rpi：目標維持在 50% 滿
+    df.loc[mask, "rpi"] = (
+        (capacity[mask] * 0.5) - df.loc[mask, "avg_rent"]
+    ) / capacity[mask]
+
+    # 轉成「差幾台」：正數 = 要補車、負數 = 要移走
+    df.loc[mask, "need_bikes"] = (
+        df.loc[mask, "rpi"] * capacity[mask]
+    ).round().astype(int)
+
     return df
 
 
@@ -71,7 +93,7 @@ st.sidebar.header("Configuration")
 if st.sidebar.button("🔄 Refresh Snapshot"):
     load_current_status.clear()
 
-# 頁面導航（Style B：用 sidebar radio）
+# 頁面導航（Style B：用 sidebar radio，狀態放 session_state）
 PAGES = [
     "🗺️ Map View",
     "⚠️ High Risk Stations",
@@ -79,7 +101,9 @@ PAGES = [
     "🏷 Station Types",
     "📈 Flow / Heatmap",
 ]
-page = st.sidebar.radio("頁面", PAGES, index=PAGES.index(st.session_state.get("active_page", PAGES[0])))
+
+default_page = st.session_state.get("active_page", PAGES[0])
+page = st.sidebar.radio("頁面", PAGES, index=PAGES.index(default_page))
 st.session_state["active_page"] = page
 
 # DB 最新 collection_time
@@ -101,10 +125,14 @@ st.sidebar.markdown("### ⏱ 現在時間")
 st.sidebar.write(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Snapshot 來自 load_current_status()，Flow/Heatmap 使用最近 24 小時資料。")
+st.sidebar.caption(
+    "Snapshot 來自 load_current_status()；Flow/Heatmap 使用最近 24 小時資料。"
+)
 
 # ===== 主資料（snapshot） =====
 df = load_current_status()
+# 移除測試區域，避免 Test Area 影響所有頁面
+df = df[df["sarea"] != "Test Area"].copy()
 
 if df.empty:
     st.error("No data available. Please ensure the collector is running.")
@@ -147,9 +175,9 @@ if page == "🗺️ Map View":
         ].copy()
         map_df = map_df.rename(columns={"lng": "lon"})
 
-        capacity = (map_df["rent"] + map_df["return_count"]).clip(lower=1)
-        map_df["empty_ratio"] = 1 - (map_df["rent"] / capacity)
-        map_df["full_ratio"] = 1 - (map_df["return_count"] / capacity)
+        capacity_map = (map_df["rent"] + map_df["return_count"]).clip(lower=1)
+        map_df["empty_ratio"] = 1 - (map_df["rent"] / capacity_map)
+        map_df["full_ratio"] = 1 - (map_df["return_count"] / capacity_map)
 
         if risk_view == "空車風險":
             map_df = map_df[map_df["rent"] <= RISK_THRESHOLD_EMPTY]
@@ -243,14 +271,14 @@ elif page == "🔮 Prediction":
         sno = selected_station_str.split(" - ")[0]
         from src.prediction import calculate_trend, predict_demand
 
-        slope, current_bikes, capacity, points_used = calculate_trend(
+        slope, current_bikes, capacity_pred, points_used = calculate_trend(
             sno, max_points=30
         )
 
         col_curr, col_trend, col_cap, col_pts = st.columns(4)
         col_curr.metric("Current Bikes", current_bikes)
         col_trend.metric("Trend (bikes/min)", f"{slope:.2f}")
-        col_cap.metric("Capacity", capacity)
+        col_cap.metric("Capacity", capacity_pred)
         col_pts.metric("Points Used", points_used)
 
         if points_used < 3:
@@ -367,7 +395,7 @@ elif page == "📈 Flow / Heatmap":
     if flow_df.empty:
         st.warning("最近 24 小時內沒有足夠資料可供 Flow / Heatmap 分析。")
     else:
-        # 模式切換在主畫面，不在 sidebar
+        # 模式切換在主畫面，不在 sidebar（避免頁面跳回去）
         mode = st.radio(
             "檢視模式",
             ["Flow（指定站）", "Heatmap（全部區域）"],
@@ -412,12 +440,14 @@ elif page == "📈 Flow / Heatmap":
             else:
                 st.info("請至少選擇一個站點來看 Flow。")
 
-        # -------- Heatmap：全部區域 --------
+        # -------- Heatmap：全部區域（RPI） --------
         else:
-            st.markdown("### 區域 x 小時 熱點圖（空車比例 empty_ratio）")
+            st.markdown("### 區域 x 小時 熱點圖（補車壓力指數 RPI）")
 
+            # 先去掉測試用區域（保險：Flow 資料如果還留 Test Area 也一起過濾）
             area_df = (
-                flow_df.groupby(["sarea", "hour"], as_index=False)["empty_ratio"]
+                flow_df[flow_df["sarea"] != "Test Area"]
+                .groupby(["sarea", "hour"], as_index=False)["rpi"]
                 .mean()
             )
 
@@ -425,7 +455,7 @@ elif page == "📈 Flow / Heatmap":
                 st.warning("無法產生熱點圖，資料不足。")
             else:
                 pivot = area_df.pivot(
-                    index="sarea", columns="hour", values="empty_ratio"
+                    index="sarea", columns="hour", values="rpi"
                 ).fillna(0.0)
 
                 cols = [
@@ -441,9 +471,11 @@ elif page == "📈 Flow / Heatmap":
                     labels=dict(
                         x="Hour of Day",
                         y="Area (sarea)",
-                        color="Empty Ratio",
+                        color="RPI",
                     ),
-                    text_auto=False,
                     origin="lower",
+                    color_continuous_scale="RdBu_r",
+                    zmin=-0.6,
+                    zmax=0.6,
                 )
                 st.plotly_chart(fig_hm, width="stretch")

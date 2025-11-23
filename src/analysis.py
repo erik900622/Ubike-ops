@@ -98,16 +98,17 @@ from sqlalchemy import text
 def get_hourly_flow_stats(hours_lookback: int = 24):
     """
     統計最近 N 小時的：
-    - 全體平均可借車數（依小時）
-    - 各區 x 小時 的平均空車比例空間 (heatmap 用)
+    - 全體平均 RPI（依小時）
+    - 各區 x 小時 的平均 RPI（heatmap 用）
 
-    回傳:
-      line_df  : columns = ["hour", "avg_rent"]
-      heat_piv : index = sarea, columns = hour(0~23), 值 = empty_ratio 平均
+    RPI = (0.5 - utilization)
+    utilization = rent / (rent + return_count)
+
+    RPI > 0  → 需要補車
+    RPI < 0  → 需要移車
     """
     engine = get_engine()
 
-    # 從 DB 抓最近 N 小時資料
     query = text(f"""
         SELECT collection_time, sarea, rent, return_count
         FROM stations_realtime
@@ -118,39 +119,40 @@ def get_hourly_flow_stats(hours_lookback: int = 24):
         df = pd.read_sql(query, conn)
 
     if df.empty:
-        return pd.DataFrame(columns=["hour", "avg_rent"]), pd.DataFrame()
+        return (
+            pd.DataFrame(columns=["hour", "avg_rpi"]),
+            pd.DataFrame()
+        )
 
-    # 轉時間 + 算小時
     df["collection_time"] = pd.to_datetime(df["collection_time"], errors="coerce")
     df = df.dropna(subset=["collection_time"])
     df["hour"] = df["collection_time"].dt.hour
 
-    # capacity / empty_ratio
     df["capacity"] = (df["rent"] + df["return_count"]).clip(lower=1)
-    df["empty_ratio"] = 1 - (df["rent"] / df["capacity"])
+    df["util"] = df["rent"] / df["capacity"]
+    df["rpi"] = 0.5 - df["util"]
 
-    # 1) 全體平均可借車數（越低代表越忙）
+    # 1) 全體平均 RPI（越大越需要補車）
     line_df = (
-        df.groupby("hour", as_index=False)["rent"]
+        df.groupby("hour", as_index=False)["rpi"]
         .mean()
-        .rename(columns={"rent": "avg_rent"})
+        .rename(columns={"rpi": "avg_rpi"})
         .sort_values("hour")
     )
 
-    # 2) 區域 x 小時 空車比例 heatmap
+    # 2) 區域 x 小時 RPI heatmap
     heat_df = (
-        df.groupby(["sarea", "hour"], as_index=False)["empty_ratio"]
+        df.groupby(["sarea", "hour"], as_index=False)["rpi"]
         .mean()
     )
 
     heat_piv = heat_df.pivot_table(
         index="sarea",
         columns="hour",
-        values="empty_ratio",
+        values="rpi",
         aggfunc="mean",
     ).sort_index()
 
-    # 確保欄名是 int（0~23），避免 Arrow/Plotly 奇怪型別問題
     heat_piv.columns = [int(c) for c in heat_piv.columns]
 
     return line_df, heat_piv
