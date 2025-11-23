@@ -29,38 +29,50 @@ def load_current_status():
 # -----------------------------
 @st.cache_data(ttl=120)
 def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
-    """
-    回傳欄位：
-      sarea, sno, sna, hour, avg_rent, avg_return, capacity, rpi, need_bikes
-
-    定義：
-      capacity   = avg_rent + avg_return（該時段平均可借 + 可還，當作有效容量）
-      rpi        = Rebalance Pressure Index 補車壓力指數
-                   > 0  → 車太少，需要補車（目標 50% 滿）
-                   < 0  → 車太多，需要移車
-      need_bikes = 依照 rpi 換算成「理論上還差幾台」，已四捨五入成整數
-    """
     engine = get_engine()
-    sql = text("""
-        SELECT
-            sarea,
-            sno,
-            sna,
-            CAST(strftime('%H', collection_time) AS INTEGER) AS hour,
-            AVG(rent) AS avg_rent,
-            AVG(return_count) AS avg_return
-        FROM stations_realtime
-        WHERE 
-            collection_time >= datetime('now', '-1 day', 'localtime')
-            AND CAST(strftime('%H', collection_time) AS INTEGER) BETWEEN :sh AND :eh
-        GROUP BY sarea, sno, sna, hour
-    """)
-    df = pd.read_sql(sql, engine, params={"sh": start_hour, "eh": end_hour})
+    dialect = engine.dialect.name  # 'sqlite' or 'postgresql'
+
+    if dialect == "postgresql":
+        sql = """
+            SELECT
+                sarea,
+                sno,
+                sna,
+                EXTRACT(HOUR FROM collection_time::timestamp)::integer AS hour,
+                AVG(rent) AS avg_rent,
+                AVG(return_count) AS avg_return
+            FROM stations_realtime
+            WHERE 
+                collection_time::timestamp >= NOW() - INTERVAL '1 day'
+                AND EXTRACT(HOUR FROM collection_time::timestamp)::integer 
+                    BETWEEN %(sh)s AND %(eh)s
+            GROUP BY sarea, sno, sna, hour
+            ORDER BY sarea, sno, hour
+        """
+        df = pd.read_sql(sql, engine, params={"sh": start_hour, "eh": end_hour})
+
+    else:
+        sql = """
+            SELECT
+                sarea,
+                sno,
+                sna,
+                CAST(strftime('%H', collection_time) AS INTEGER) AS hour,
+                AVG(rent) AS avg_rent,
+                AVG(return_count) AS avg_return
+            FROM stations_realtime
+            WHERE 
+                collection_time >= datetime('now', '-1 day', 'localtime')
+                AND CAST(strftime('%H', collection_time) AS INTEGER) 
+                    BETWEEN :sh AND :eh
+            GROUP BY sarea, sno, sna, hour
+        """
+        df = pd.read_sql(sql, engine, params={"sh": start_hour, "eh": end_hour})
 
     if df.empty:
         return df
 
-    # ---- 容量 + 補車壓力指數 ----
+    # ---- capacity & RPI ----
     capacity = df["avg_rent"] + df["avg_return"]
     df["capacity"] = capacity
 
@@ -68,12 +80,10 @@ def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
     df["need_bikes"] = 0
 
     mask = capacity > 0
-    # rpi：目標維持在 50% 滿
     df.loc[mask, "rpi"] = (
         (capacity[mask] * 0.5) - df.loc[mask, "avg_rent"]
     ) / capacity[mask]
 
-    # 轉成「差幾台」：正數 = 要補車、負數 = 要移走
     df.loc[mask, "need_bikes"] = (
         df.loc[mask, "rpi"] * capacity[mask]
     ).round().astype(int)
