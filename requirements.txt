@@ -1,8 +1,8 @@
-streamlit
-pandas
-requests
-sqlalchemy
-scikit-learn
-pydeck
-plotly
 schedule
+streamlit
+requests
+pandas
+sqlalchemy
+psycopg2-binary
+plotly
+pydeck
