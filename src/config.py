@@ -11,5 +11,3 @@ DB_URL = os.getenv("DB_URL", "sqlite:///data/ubike.db")
 # ---- 分析閾值設定 ----
 RISK_THRESHOLD_EMPTY = 1   # 可借車數 <= 1 視為空車風險
 RISK_THRESHOLD_FULL = 1    # 可還車位 <= 1 視為滿站風險
-
-
