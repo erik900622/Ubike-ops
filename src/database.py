@@ -1,27 +1,27 @@
-# ============================================================
+# src/database.py
 import pandas as pd
 from sqlalchemy import create_engine, text
 from src.config import DB_URL
 
 engine = create_engine(DB_URL, pool_pre_ping=True, future=True)
 
+
 def get_engine():
     return engine
 
 
 def init_db():
-    """建立 stations_realtime 表與索引（若不存在）。"""
-    dialect = engine.dialect.name  # 'sqlite' or 'postgresql'
+    """建立 stations_realtime 表與索引（若不存在）。
 
-    if dialect == "postgresql":
-        id_col = "BIGSERIAL PRIMARY KEY"
-    else:  # sqlite 等
-        id_col = "INTEGER PRIMARY KEY"
+    - 本地 sqlite：id INTEGER PRIMARY KEY AUTOINCREMENT
+    - Railway Postgres：id BIGSERIAL PRIMARY KEY
+    """
+    is_sqlite = DB_URL.startswith("sqlite")
 
-    with engine.begin() as conn:
-        conn.execute(text(f"""
+    if is_sqlite:
+        create_table_sql = """
             CREATE TABLE IF NOT EXISTS stations_realtime (
-                id {id_col},
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 collection_time TEXT,
                 sno TEXT,
                 sna TEXT,
@@ -32,7 +32,26 @@ def init_db():
                 return_count INTEGER,
                 update_time TEXT
             );
-        """))
+        """
+    else:
+        # PostgreSQL 版本
+        create_table_sql = """
+            CREATE TABLE IF NOT EXISTS stations_realtime (
+                id BIGSERIAL PRIMARY KEY,
+                collection_time TIMESTAMPTZ,
+                sno TEXT,
+                sna TEXT,
+                sarea TEXT,
+                lat DOUBLE PRECISION,
+                lng DOUBLE PRECISION,
+                rent INTEGER,
+                return_count INTEGER,
+                update_time TIMESTAMPTZ
+            );
+        """
+
+    with engine.begin() as conn:
+        conn.execute(text(create_table_sql))
 
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_sno_time

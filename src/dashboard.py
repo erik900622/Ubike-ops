@@ -6,6 +6,7 @@ import pandas as pd
 import pydeck as pdk
 import plotly.express as px
 import streamlit as st
+from sqlalchemy import text  # ✅ 新增
 
 # 讓 Python 找到 src package
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -40,7 +41,7 @@ def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
       need_bikes = 依照 rpi 換算成「理論上還差幾台」，已四捨五入成整數
     """
     engine = get_engine()
-    sql = """
+    sql = text("""
         SELECT
             sarea,
             sno,
@@ -53,7 +54,7 @@ def load_hourly_flow(start_hour: int = 6, end_hour: int = 22) -> pd.DataFrame:
             collection_time >= datetime('now', '-1 day', 'localtime')
             AND CAST(strftime('%H', collection_time) AS INTEGER) BETWEEN :sh AND :eh
         GROUP BY sarea, sno, sna, hour
-    """
+    """)
     df = pd.read_sql(sql, engine, params={"sh": start_hour, "eh": end_hour})
 
     if df.empty:
